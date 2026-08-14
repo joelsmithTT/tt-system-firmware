@@ -63,25 +63,20 @@ jobs:
     needs: [gen-config]
     env:
       ASIC_ID: 0
+      CI_CONTAINER: ''
     strategy:
       fail-fast: false
       matrix:
         config: ${{ fromJson(needs.gen-config.outputs.matrix-config-bh) }}
     runs-on: ${{ matrix.config.board }}
-    container:
-      image: ghcr.io/tenstorrent/tt-system-firmware/ci-image:v19.11.0
-      volumes:
-        - /dev/hugepages-1G:/dev/hugepages-1G
-        - /lib/modules:/lib/modules:ro
-        - /usr/src:/usr/src:ro
-        - /opt/tenstorrent/kmd-builds/:/opt/tenstorrent/kmd-builds/
-      options: '--device /dev/tenstorrent --device /dev/bus/usb --device /dev/ipmi0 --privileged'
     steps:
       - name: Cleanup State
         if: ${{ always() }}
         run: |
           # Print state of current directory
           ls -la
+          # Previous container jobs may have left root-owned workspace files.
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE" || true
           # Clean up any files left over from previous steps
           rm -rf *
 
@@ -96,14 +91,48 @@ jobs:
           kmd-version: ${{ matrix.config.kmd_build }}
           kmd-ref: ${{ inputs.kmd_ref }}
 
-      - name: Prepare Container
-        uses: ./tt-system-firmware/.github/workflows/prepare-container
-        with:
-          app-path: tt-system-firmware
+      - name: Start CI container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_name="tsf-${GITHUB_RUN_ID}-${GITHUB_JOB}-${GITHUB_RUN_ATTEMPT}"
+          docker rm -f "$container_name" >/dev/null 2>&1 || true
+          docker run --detach --name "$container_name" \
+            --privileged \
+            --device /dev/tenstorrent \
+            --device /dev/bus/usb \
+            --device /dev/ipmi0 \
+            --volume /dev/hugepages-1G:/dev/hugepages-1G \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --workdir "$GITHUB_WORKSPACE" \
+            ghcr.io/tenstorrent/tt-system-firmware/ci-image:v19.11.0 \
+            sleep infinity
+          echo "CI_CONTAINER=$container_name" >> "$GITHUB_ENV"
+
+      - name: Prepare CI container
+        shell: bash
+        run: |
+          docker exec \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env GITHUB_WORKSPACE \
+            --env GITHUB_ENV \
+            --env GITHUB_PATH \
+            "$CI_CONTAINER" \
+            bash tt-system-firmware/scripts/ci/prepare-ci-container.sh \
+              tt-system-firmware
 
       - name: run-dmc-tests
         run: |
-          tt-system-firmware/scripts/ci/run-smoke.sh -t dmc -p $ASIC_ID ${{ matrix.config.board }}
+          docker exec \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env ASIC_ID \
+            --env ZEPHYR_BASE \
+            --env ZEPHYR_SDK_INSTALL_DIR \
+            "$CI_CONTAINER" \
+            bash -c 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; \
+              tt-system-firmware/scripts/ci/run-smoke.sh \
+                -t dmc -p "$ASIC_ID" "${{ matrix.config.board }}"'
 
       - name: Upload DMC Smoke Tests
         if: ${{ always() }}
@@ -125,7 +154,15 @@ jobs:
 
       - name: run-smc-tests
         run: |
-          tt-system-firmware/scripts/ci/run-smoke.sh -t smc -p $ASIC_ID ${{ matrix.config.board }}
+          docker exec \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env ASIC_ID \
+            --env ZEPHYR_BASE \
+            --env ZEPHYR_SDK_INSTALL_DIR \
+            "$CI_CONTAINER" \
+            bash -c 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; \
+              tt-system-firmware/scripts/ci/run-smoke.sh \
+                -t smc -p "$ASIC_ID" "${{ matrix.config.board }}"'
 
       - name: Upload SMC Smoke Tests
         if: ${{ always() }}
@@ -146,13 +183,25 @@ jobs:
             zephyr/twister-smc-smoke/twister.json
 
       - name: Print RTT logs
-        if: ${{ failure() }}
-        working-directory: tt-system-firmware
+        if: ${{ failure() && env.CI_CONTAINER != '' }}
         run: |
-          echo "DMC RTT logs:"
-          python3 ./scripts/dmc_rtt.py -n
-          echo "SMC state dump:"
-          python3 ./scripts/dump_smc_state.py --asic-id $ASIC_ID
+          docker exec \
+            --workdir "$GITHUB_WORKSPACE/tt-system-firmware" \
+            --env ASIC_ID \
+            "$CI_CONTAINER" \
+            bash -c '
+              echo "DMC RTT logs:"
+              python3 ./scripts/dmc_rtt.py -n
+              echo "SMC state dump:"
+              python3 ./scripts/dump_smc_state.py --asic-id "$ASIC_ID"
+            '
+
+      - name: Stop CI container
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${CI_CONTAINER:-}" ]]; then
+            docker rm -f "$CI_CONTAINER"
+          fi
 
   smoke-e2e-test:
     name: BH Smoke E2E Test on ${{ matrix.config.board }}

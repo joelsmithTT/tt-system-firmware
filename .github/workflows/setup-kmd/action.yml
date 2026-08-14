@@ -60,37 +60,72 @@ runs:
           exit 1
         fi
 
-        kernel_cc="$(
+        kernel_cc_command="$(
           { make -C "$kernel_build_dir" M=/tmp --no-print-directory -pn 2>/dev/null || true; } |
-            awk '$1 == "CC" && ($2 == "=" || $2 == ":=") && !found { print $3; found=1 }'
+            awk '
+              $1 == "CC" && ($2 == "=" || $2 == ":=") && !found {
+                sub(/^[[:space:]]*CC[[:space:]]*:?=[[:space:]]*/, "")
+                print
+                found=1
+              }
+            '
         )"
-        if [[ -z "$kernel_cc" ]]; then
+        if [[ -z "$kernel_cc_command" ]]; then
           echo "::error::Unable to determine the compiler required by the host kernel build."
           exit 1
         fi
 
-        if ! command -v "$kernel_cc" >/dev/null 2>&1; then
-          case "$kernel_cc" in
-            gcc-[0-9]*|clang-[0-9]*)
-              compiler_package="$kernel_cc"
+        read -r -a kernel_cc_words <<< "$kernel_cc_command"
+        kernel_compiler=""
+        for cc_word in "${kernel_cc_words[@]}"; do
+          cc_name="${cc_word##*/}"
+          case "$cc_name" in
+            gcc|clang|gcc-[0-9]*|clang-[0-9]*|*-gcc-[0-9]*)
+              kernel_compiler="$cc_word"
+              ;;
+          esac
+        done
+        if [[ -z "$kernel_compiler" ]]; then
+          echo "::error::Unable to identify a gcc or clang compiler in host kernel CC command '${kernel_cc_command}'."
+          exit 1
+        fi
+
+        required_cc_commands=("${kernel_cc_words[0]}")
+        if [[ "$kernel_compiler" != "${required_cc_commands[0]}" ]]; then
+          required_cc_commands+=("$kernel_compiler")
+        fi
+
+        compiler_packages=()
+        for required_cc in "${required_cc_commands[@]}"; do
+          if command -v "$required_cc" >/dev/null 2>&1; then
+            continue
+          fi
+
+          cc_name="${required_cc##*/}"
+          case "$cc_name" in
+            gcc|clang|gcc-[0-9]*|clang-[0-9]*|ccache|distcc)
+              compiler_package="$cc_name"
               ;;
             *-gcc-[0-9]*)
-              compiler_package="gcc-${kernel_cc##*-gcc-}"
+              compiler_package="gcc-${cc_name##*-gcc-}"
               ;;
             *)
-              echo "::error::Host kernel requires unavailable compiler '${kernel_cc}', and its package cannot be inferred."
+              echo "::error::Host kernel requires unavailable compiler command '${required_cc}', and its package cannot be inferred."
               exit 1
               ;;
           esac
+          compiler_packages+=("$compiler_package")
+        done
 
-          echo "Installing host kernel compiler ${compiler_package}"
+        if (( ${#compiler_packages[@]} > 0 )); then
+          echo "Installing host kernel compiler packages: ${compiler_packages[*]}"
           if ! "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y "$compiler_package"; then
-            echo "::error::Unable to install compiler package ${compiler_package} required by the host kernel."
+            apt-get install -y "${compiler_packages[@]}"; then
+            echo "::error::Unable to install compiler packages required by the host kernel: ${compiler_packages[*]}"
             exit 1
           fi
         fi
-        echo "Host kernel compiler: $kernel_cc"
+        echo "Host kernel compiler command: $kernel_cc_command"
 
         source_dir="$(mktemp -d)"
         cleanup() {
