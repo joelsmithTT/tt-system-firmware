@@ -26,6 +26,16 @@
 #define PCIE_LOGICAL_Y       0
 #define PCIE_DBI_REG_TLB     14
 
+void SendPcieMsi(uint8_t x, uint8_t y, uint32_t vector_id);
+
+/**
+ * @brief Send the host doorbell MSI (vector 0) on the host-facing PCIe tile.
+ *
+ * The MSI carries no payload. It tells the host to look for new FW log data or device
+ * events. Safe to call from any context, including ISRs.
+ */
+void SendHostDoorbellMsi(void);
+
 static inline void WriteDbiReg(const uint32_t addr, const uint32_t data)
 {
 	const uint8_t noc_id = 0;

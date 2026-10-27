@@ -9,7 +9,15 @@
 #include <tenstorrent/smc_msg.h>
 #include <tenstorrent/msgqueue.h>
 
+#include "chip_info.h"
 #include "pcie.h"
+
+/* Translated NOC coordinates of the host-facing PCIe tile. */
+#define HOST_PCIE_X 19
+#define HOST_PCIE_Y 24
+
+/* SendPcieMsi() reprograms a shared NOC2AXI TLB and then writes through it. */
+static struct k_spinlock msi_lock;
 
 #define BH_PCIE_DWC_PCIE_USP_PF0_MSI_CAP_PCI_MSI_CAP_ID_NEXT_CTRL_REG_REG_ADDR 0x00000050
 #define BH_PCIE_DWC_PCIE_USP_PF0_MSI_CAP_MSI_CAP_OFF_04H_REG_REG_ADDR          0x00000054
@@ -46,6 +54,8 @@ void SendPcieMsi(uint8_t x, uint8_t y, uint32_t vector_id)
 {
 	BH_PCIE_DWC_PCIE_USP_PF0_MSI_CAP_HDL_PATH_E982B20F_PCI_MSI_CAP_ID_NEXT_CTRL_REG_reg_u
 		pci_msi_cap;
+	k_spinlock_key_t key = k_spin_lock(&msi_lock);
+
 	pci_msi_cap.val =
 		ReadDbiReg(BH_PCIE_DWC_PCIE_USP_PF0_MSI_CAP_PCI_MSI_CAP_ID_NEXT_CTRL_REG_REG_ADDR);
 	uint32_t vectors_allowed = GetVectorsAllowed(pci_msi_cap.f.pci_msi_multiple_msg_en);
@@ -66,6 +76,18 @@ void SendPcieMsi(uint8_t x, uint8_t y, uint32_t vector_id)
 		NOC2AXITlbSetup(ring, tlb_num, x, y, msi_addr);
 		NOC2AXIWrite32(ring, tlb_num, msi_addr, msi_data);
 	}
+
+	k_spin_unlock(&msi_lock, key);
+}
+
+void SendHostDoorbellMsi(void)
+{
+	/* HOST_PCIE_X/Y are translated coordinates. */
+	if (!bh_chip_info_feature_noc_translation_en()) {
+		return;
+	}
+
+	SendPcieMsi(HOST_PCIE_X, HOST_PCIE_Y, 0);
 }
 
 /**

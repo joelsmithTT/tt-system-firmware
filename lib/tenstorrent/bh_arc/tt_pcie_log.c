@@ -17,9 +17,7 @@
 
 #include "chip_info.h"
 #include "noc2axi.h"
-
-/* Forward declaration for PCIe MSI function */
-void SendPcieMsi(uint8_t x, uint8_t y, uint32_t vector_id);
+#include "pcie.h"
 
 LOG_MODULE_REGISTER(fw_tt_pcie_log_backend, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -275,7 +273,7 @@ static void flush_buffer_to_host(void)
 	NOC2AXIWrite32(0, noc2axi_tlb, log_buffer_iova + 12, FW_LOG_BUFFER_OWNER_HOST);
 
 	/* Trigger interrupt to notify host of new data */
-	SendPcieMsi(PCIE_X, PCIE_Y, 0);
+	SendHostDoorbellMsi();
 
 	/* Reset framed buffer after successful write */
 	framed_buffer_pos = 0;
