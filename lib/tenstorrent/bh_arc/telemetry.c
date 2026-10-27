@@ -183,6 +183,7 @@ static struct telemetry_table telemetry_table = {
 		[73] = {TAG_FW_CAPABILITIES_0, TELEM_OFFSET(TAG_FW_CAPABILITIES_0)},
 		[74] = {TAG_FW_ACTIVE_CONFIG_0, TELEM_OFFSET(TAG_FW_ACTIVE_CONFIG_0)},
 		[75] = {TAG_FLASH_JEDEC_ID, TELEM_OFFSET(TAG_FLASH_JEDEC_ID)},
+		[76] = {TAG_EVENT_RING_ADDR, TELEM_OFFSET(TAG_EVENT_RING_ADDR)},
 	},
 };
 /* clang-format on */
@@ -289,6 +290,12 @@ void UpdateTelemetryGddrThermTrip(bool enabled)
 
 	active_config.bits.gddr_therm_trip = enabled ? 1U : 0U;
 	telemetry[TAG_FW_ACTIVE_CONFIG_0] = active_config.u32_all;
+}
+
+void UpdateTelemetryEventRing(uint32_t ring_addr)
+{
+	/* Note that this may be called before init_telemetry. */
+	telemetry[TAG_EVENT_RING_ADDR] = ring_addr;
 }
 
 telemetry_feature_flags_bits_0_t GetActiveFeatures(void)

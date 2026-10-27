@@ -494,12 +494,18 @@ typedef union {
  */
 #define TAG_FLASH_JEDEC_ID 80
 
+/** @brief CSM address of the device event ring, 0 if not published.
+ *
+ * See @ref ttfw_device_events. Tags 81-85 are left for ECC reporting.
+ */
+#define TAG_EVENT_RING_ADDR 86
+
 /** @} */ /* end of telemetry_tag group */
 
 /* Not a real tag, signifies the last tag in the list.
  * MUST be incremented if new tags are defined.
  */
-#define TAG_COUNT 81
+#define TAG_COUNT 87
 
 /* Telemetry tags are at offset `tag` in the telemetry buffer */
 #define TELEM_OFFSET(tag) (tag)
@@ -548,6 +554,8 @@ void UpdateTelemetryGddrThermTrip(bool enabled);
  * @ref telemetry_feature_flags_bits_0_t.
  */
 telemetry_feature_flags_bits_0_t GetActiveFeatures(void);
+/** @brief Publish the CSM address of the device event ring. */
+void UpdateTelemetryEventRing(uint32_t ring_addr);
 bool GetTelemetryTagValid(uint16_t tag);
 uint32_t GetTelemetryTag(uint16_t tag);
 

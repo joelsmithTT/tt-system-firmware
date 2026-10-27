@@ -109,6 +109,9 @@ enum tt_smc_msg {
 	/** @brief @ref test_rqst "Test request" */
 	TT_SMC_MSG_TEST = 0x90,
 
+	/** @brief @ref test_event_record_rqst "Test event record request" */
+	TT_SMC_MSG_TEST_EVENT_RECORD = 0x91,
+
 	/** @brief @ref pcie_dma_transfer_rqst "PCIe DMA chip-to-host transfer request" */
 	TT_SMC_MSG_PCIE_DMA_CHIP_TO_HOST_TRANSFER = 0x9B,
 

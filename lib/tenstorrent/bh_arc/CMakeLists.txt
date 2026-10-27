@@ -72,6 +72,7 @@ if(NOT CONFIG_TT_SMC_RECOVERY)
     bh_power.c
     clock_wave.c
     counter.c
+    device_events.c
     dvfs.c
     eth.c
     fan_ctrl.c

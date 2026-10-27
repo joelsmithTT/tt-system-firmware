@@ -517,6 +517,38 @@ struct test_rqst {
 	uint32_t test_value;
 };
 
+/** @brief Host request to append records to the device event ring, for testing
+ * @details Messages of this type are processed by @ref test_event_record_handler.
+ *
+ * Only the TEST event type is accepted. @c repeat records are appended, then one doorbell
+ * MSI is sent. A @c repeat of 0 appends nothing and sends only the doorbell. Record @c i (0 to repeat - 1) carries data[2] = @c data[2] + @c i, so a
+ * single record round-trips every field and a batch can be checked for order and loss.
+ * Records that do not fit are dropped and counted in the ring's overflow count. On success,
+ * response data[1] holds the ring's wptr after the append.
+ */
+struct test_event_record_rqst {
+	/** @brief The command code corresponding to @ref TT_SMC_MSG_TEST_EVENT_RECORD */
+	uint8_t command_code;
+
+	/** @brief One byte of padding */
+	uint8_t pad;
+
+	/** @brief Event type; must be @ref EVENT_TYPE_TEST */
+	uint16_t type;
+
+	/** @brief Event source */
+	uint16_t source;
+
+	/** @brief Number of records to append, 0 to @ref EVENT_RING_TEST_MAX_REPEAT */
+	uint16_t repeat;
+
+	/** @brief Event cause */
+	uint32_t cause;
+
+	/** @brief Event data; data[2] is the base for the per-record index */
+	uint32_t data[3];
+};
+
 /** @brief Host request to initiate a PCIe DMA transfer
  * @details Messages of this type are processed by @ref pcie_dma_transfer_handler.
  *
@@ -1086,6 +1118,9 @@ union request {
 
 	/** @brief A test request */
 	struct test_rqst test;
+
+	/** @brief A test event record request */
+	struct test_event_record_rqst test_event_record;
 
 	/** @brief A PCIe DMA transfer request */
 	struct pcie_dma_transfer_rqst pcie_dma_transfer;
