@@ -1,4 +1,5 @@
-// Sends N tile event tokens to ARC's MSI catcher, each pointing at a record in L1.
+// Sends N tile event records to ARC, announcing each with a token to the MSI catcher
+// or, with PARAM_PMM, a message to the PMM mailbox.
 #include <stdint.h>
 #include "layout.h"
 
@@ -36,6 +37,7 @@ extern "C" void brisc_main()
     const uint32_t n = RD(PARAM_N);
     const uint32_t marker = RD(PARAM_MARKER);
     const uint32_t sync = RD(PARAM_SYNC);
+    const uint32_t pmm = RD(PARAM_PMM);
     const uint32_t me = RD(NOC0 + NOC_ID_LOGICAL) & 0xFFFu;
 
     WR(NOC0 + 0x100u, RD(NOC0 + 0x100u) | (1u << 16)); // NIU_CFG_0: enable command FIFOs, as tt-lab does
@@ -47,7 +49,7 @@ extern "C" void brisc_main()
     WR(NOC0 + NOC_COUNTER_CLEAR, 0xFFFFu); // counters are stale from before reset, as tt-lab does
 
     for (uint32_t i = 0; i < n; i++) {
-        const uint32_t rec = RECORDS + 32u * i;
+        const uint32_t rec = RECORDS + RECORD_STRIDE * i;
         const uint32_t tok = TOKBUF + 64u * i;
 
         WR(rec + 4, 0u); // type TEST
@@ -56,11 +58,23 @@ extern "C" void brisc_main()
         WR(rec + 16, i);
         WR(rec + 20, me);
         WR(rec, RECORD_MAGIC); // last: the record is complete
-        WR(tok, 0x80000000u | ((rec >> 4) << 12) | me);
+        if (pmm) {
+            // PMM keeps one message per tile: wait for ARC to ack the previous record.
+            uint32_t spins = 0;
+            while (i && RD(rec - RECORD_STRIDE) == RECORD_MAGIC && ++spins < ACK_SPINS) {
+            }
+            if (spins == ACK_SPINS) {
+                WR(DONE, DONE_STUCK | (i - 1));
+                return;
+            }
+            WR(tok, (me & 0x3Fu) << 26 | (me >> 6) << 20 | 1u << 12 | rec >> 9);
+        } else {
+            WR(tok, 0x80000000u | ((rec >> 4) << 12) | me);
+        }
         FENCE();
 
         WR(NOC0 + WR_BUF + NOC_TARG_ADDR_LO, tok);
-        WR(NOC0 + WR_BUF + NOC_RET_ADDR_LO, ARC_FIFO);
+        WR(NOC0 + WR_BUF + NOC_RET_ADDR_LO, pmm ? ARC_PMM : ARC_FIFO);
         WR(NOC0 + WR_BUF + NOC_RET_ADDR_HI, ARC_COORD);
         WR(NOC0 + WR_BUF + NOC_AT_LEN_BE, 4u);
         WR(NOC0 + WR_BUF + NOC_CMD_CTRL, 1u);
