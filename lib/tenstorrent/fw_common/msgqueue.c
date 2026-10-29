@@ -461,6 +461,16 @@ static void msi_catcher_flush(void)
 	ReadReg(MSI_CATCHER_FLUSH_REG_ADDR);
 }
 
+/* Nonzero MSI catcher values are tile event tokens (see device_events.c). */
+__weak void msi_catcher_token(uint32_t token)
+{
+	ARG_UNUSED(token);
+}
+
+__weak void msi_catcher_overflowed(void)
+{
+}
+
 static void msgqueue_msi_interrupt_handler(void *arg)
 {
 	(void)(arg);
@@ -473,6 +483,8 @@ static void msgqueue_msi_interrupt_handler(void *arg)
 
 		if (msi_data == 0) {
 			msi_for_msgqueue = true;
+		} else {
+			msi_catcher_token(msi_data);
 		}
 	}
 
@@ -486,6 +498,7 @@ static void msgqueue_msi_overflow_handler(void *arg)
 	(void)(arg);
 
 	msi_catcher_flush();
+	msi_catcher_overflowed();
 	k_work_submit(&msgqueue_work);
 }
 

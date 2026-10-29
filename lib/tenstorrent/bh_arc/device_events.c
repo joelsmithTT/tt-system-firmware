@@ -15,6 +15,7 @@
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/util.h>
 
+#include "noc2axi.h"
 #include "pcie.h"
 #include "telemetry.h"
 #include "timer.h"
@@ -134,6 +135,109 @@ static uint8_t test_event_record_handler(const union request *request, struct re
 	response->data[1] = wptr;
 	return 0;
 }
+
+/*
+ * EXPERIMENT: tile events.  A tile writes a struct tile_event_record into its
+ * own L1, then writes a token to ARC's MSI catcher FIFO (8,0):0x800B0000:
+ *   bit 31      1 (0 is the host's message queue doorbell)
+ *   bits 30:12  record L1 address >> 4
+ *   bits 11:0   the tile's translated NOC coordinates, x | y << 6
+ * ARC copies the record into the event ring, with the tile as source, and
+ * acks by clearing the record's magic.  A token is only a hint: the FIFO
+ * holds 64 and stock firmware flushes it on overflow.
+ */
+#define TILE_TOKEN_FLAG    BIT(31)
+#define TILE_RECORD_MAGIC  0x54455654 /* "TEVT" */
+#define TILE_EVENT_TLB     15
+
+struct tile_event_record {
+	uint32_t magic;
+	uint16_t type;
+	uint16_t reserved;
+	uint32_t cause;
+	uint32_t data[3];
+};
+
+static struct {
+	uint32_t tokens, records, bad, queue_full, overflows;
+} tile_stats;
+
+K_MSGQ_DEFINE(tile_tokens, sizeof(uint32_t), 128, 4);
+
+static bool tile_coords_ok(uint32_t x, uint32_t y)
+{
+	/*
+	 * Translated Tensix columns present on every SKU: x 1-7 and 10-14, y 2-11.
+	 * x 15-16 are fused off on p100, and a NOC access to a missing tile can hang.
+	 */
+	return ((x >= 1 && x <= 7) || (x >= 10 && x <= 14)) && y >= 2 && y <= 11;
+}
+
+static void tile_event_work_handler(struct k_work *work)
+{
+	uint32_t token;
+
+	ARG_UNUSED(work);
+	while (k_msgq_get(&tile_tokens, &token, K_NO_WAIT) == 0) {
+		uint32_t x = token & 0x3F, y = (token >> 6) & 0x3F;
+		uint32_t addr = ((token >> 12) & 0x7FFFF) << 4;
+		uint32_t w[5];
+
+		if (!tile_coords_ok(x, y)) {
+			tile_stats.bad++;
+			continue;
+		}
+
+		NOC2AXITlbSetup(0, TILE_EVENT_TLB, x, y, addr);
+		for (int i = 0; i < 5; i++) {
+			w[i] = NOC2AXIRead32(0, TILE_EVENT_TLB, addr + 4 * i);
+		}
+		if (w[0] != TILE_RECORD_MAGIC || (w[1] & 0xFFFF) > EVENT_TYPE_FW_MAX) {
+			tile_stats.bad++;
+			continue;
+		}
+
+		uint32_t data[3] = {w[3], w[4], NOC2AXIRead32(0, TILE_EVENT_TLB, addr + 20)};
+
+		event_ring_append(w[1] & 0xFFFF, EVENT_SOURCE_TILE(x, y), w[2], data);
+		NOC2AXIWrite32(0, TILE_EVENT_TLB, addr, 0);
+		tile_stats.records++;
+	}
+}
+
+static K_WORK_DEFINE(tile_event_work, tile_event_work_handler);
+
+void msi_catcher_token(uint32_t token)
+{
+	tile_stats.tokens++;
+	if (!(token & TILE_TOKEN_FLAG)) {
+		tile_stats.bad++;
+		return;
+	}
+	if (k_msgq_put(&tile_tokens, &token, K_NO_WAIT) != 0) {
+		tile_stats.queue_full++;
+	}
+	k_work_submit(&tile_event_work);
+}
+
+void msi_catcher_overflowed(void)
+{
+	tile_stats.overflows++;
+}
+
+/* EXPERIMENT: TT_SMC_MSG_TEST_TILE_EVENTS (0x92) returns tile_stats in data[1..5]. */
+static uint8_t test_tile_events_handler(const union request *request, struct response *response)
+{
+	ARG_UNUSED(request);
+	response->data[1] = tile_stats.tokens;
+	response->data[2] = tile_stats.records;
+	response->data[3] = tile_stats.bad;
+	response->data[4] = tile_stats.queue_full;
+	response->data[5] = tile_stats.overflows;
+	return 0;
+}
+
+REGISTER_MESSAGE(TT_SMC_MSG_TEST_TILE_EVENTS, test_tile_events_handler);
 
 static int device_events_init(void)
 {
