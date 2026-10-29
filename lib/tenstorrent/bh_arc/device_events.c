@@ -11,6 +11,7 @@
 #include <tenstorrent/smc_msg.h>
 #include <tenstorrent/sys_init_defines.h>
 #include <zephyr/init.h>
+#include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/util.h>
@@ -225,7 +226,120 @@ void msi_catcher_overflowed(void)
 	tile_stats.overflows++;
 }
 
-/* EXPERIMENT: TT_SMC_MSG_TEST_TILE_EVENTS (0x92) returns tile_stats in data[1..5]. */
+/*
+ * EXPERIMENT: the same records, announced through the PMM mailbox (8,0):0x80400000
+ * instead of the MSI catcher.  A tile writes one 32-bit PMM message:
+ *   bits 31:26  x, bits 25:20  y (translated)
+ *   bit 12      flag0: a record is pending
+ *   bits 11:0   record L1 address >> 9 (512-byte aligned)
+ * PMM keeps the latest message per tile, so a burst from many tiles loses
+ * nothing.  flag0's count crossing 1 raises PMM's urgent interrupt; ARC finds
+ * flagged tiles from the column bitmaps, forwards each record, clears the
+ * tile's flag by writing a message on its behalf, then acks by clearing the
+ * magic.  A tile waits for the ack before announcing its next record.
+ */
+#define PMM_BASE              0x80400000
+#define PMM_MESSAGE           (PMM_BASE + 0x000)
+#define PMM_CTRL              (PMM_BASE + 0x004)
+#define PMM_FLG0_THR_TOTAL    (PMM_BASE + 0x150)
+#define PMM_FLG0_CNT_IRQ      (PMM_BASE + 0x204)
+#define PMM_FLG0_CNT_IRQ_MASK (PMM_BASE + 0x208)
+#define PMM_FLG0_CNT_IRQ_PRIO (PMM_BASE + 0x20C)
+#define PMM_IRQ_EN            (PMM_BASE + 0x250)
+#define PMM_FLG0_COL_STAT     (PMM_BASE + 0x26C)
+#define PMM_FLG0_COL_BITMAP(x) (PMM_BASE + 0x27C + 4 * (x))
+#define PMM_MAILBOX(x, y)     (PMM_BASE + 0x800 + 4 * (17 * (y) + (x)))
+#define PMM_CTRL_ENABLE       BIT(0)
+#define PMM_CTRL_CLEAR        BIT(1)
+#define PMM_IRQ_TOTAL         BIT(8)
+#define PMM_FLAG0             BIT(12)
+#define PMM_IRQ_REGULAR       76 /* ARC Interrupts: pmm_irq is lines 76-77 */
+#define PMM_IRQ_URGENT        77
+
+static struct {
+	uint32_t irq[2], records, bad;
+} pmm_stats;
+
+static void pmm_work_handler(struct k_work *work)
+{
+	uint32_t cols;
+
+	ARG_UNUSED(work);
+	while ((cols = ReadReg(PMM_FLG0_COL_STAT)) != 0) {
+		for (uint32_t x = 0; cols != 0; x++, cols >>= 1) {
+			if (!(cols & 1)) {
+				continue;
+			}
+			uint32_t rows = ReadReg(PMM_FLG0_COL_BITMAP(x));
+
+			for (uint32_t y = 0; rows != 0; y++, rows >>= 1) {
+				if (!(rows & 1)) {
+					continue;
+				}
+				uint32_t addr = (ReadReg(PMM_MAILBOX(x, y)) & 0xFFF) << 9;
+				bool ok = tile_coords_ok(x, y);
+				uint32_t w[6];
+
+				if (ok) {
+					NOC2AXITlbSetup(0, TILE_EVENT_TLB, x, y, addr);
+					for (int i = 0; i < 6; i++) {
+						w[i] = NOC2AXIRead32(0, TILE_EVENT_TLB, addr + 4 * i);
+					}
+					ok = w[0] == TILE_RECORD_MAGIC &&
+					     (w[1] & 0xFFFF) <= EVENT_TYPE_FW_MAX;
+				}
+				if (ok) {
+					event_ring_append(w[1] & 0xFFFF, EVENT_SOURCE_TILE(x, y),
+							  w[2], &w[3]);
+				}
+				/* Clear the flag before the ack, or the tile's next one is lost. */
+				WriteReg(PMM_MESSAGE, x << 26 | y << 20);
+				if (ok) {
+					NOC2AXIWrite32(0, TILE_EVENT_TLB, addr, 0);
+					pmm_stats.records++;
+				} else {
+					pmm_stats.bad++;
+				}
+			}
+		}
+	}
+	/* Sticky: re-raised at once if a tile flagged since the scan. */
+	WriteReg(PMM_FLG0_CNT_IRQ, PMM_IRQ_TOTAL);
+	irq_enable(PMM_IRQ_REGULAR);
+	irq_enable(PMM_IRQ_URGENT);
+}
+
+static K_WORK_DEFINE(pmm_work, pmm_work_handler);
+
+static void pmm_isr(const void *arg)
+{
+	pmm_stats.irq[(uintptr_t)arg - PMM_IRQ_REGULAR]++;
+	irq_disable(PMM_IRQ_REGULAR);
+	irq_disable(PMM_IRQ_URGENT);
+	k_work_submit(&pmm_work);
+}
+
+static void pmm_init(void)
+{
+	WriteReg(PMM_CTRL, PMM_CTRL_ENABLE | PMM_CTRL_CLEAR);
+	WriteReg(PMM_CTRL, PMM_CTRL_ENABLE);
+	WriteReg(PMM_FLG0_THR_TOTAL, 1);
+	WriteReg(PMM_FLG0_CNT_IRQ_PRIO, PMM_IRQ_TOTAL); /* urgent */
+	WriteReg(PMM_FLG0_CNT_IRQ_MASK, 0xFF);           /* unmask the total only */
+	WriteReg(PMM_FLG0_CNT_IRQ, 0x1FF);
+	/* Both lines, to learn which is which. */
+	IRQ_CONNECT(PMM_IRQ_REGULAR, 0, pmm_isr, PMM_IRQ_REGULAR, 0);
+	IRQ_CONNECT(PMM_IRQ_URGENT, 0, pmm_isr, PMM_IRQ_URGENT, 0);
+	irq_enable(PMM_IRQ_REGULAR);
+	irq_enable(PMM_IRQ_URGENT);
+	WriteReg(PMM_IRQ_EN, BIT(0) | BIT(1));
+}
+
+/*
+ * EXPERIMENT: TT_SMC_MSG_TEST_TILE_EVENTS (0x92) returns tile_stats in data[1..5],
+ * PMM interrupts on lines 76 | 77 << 16 in data[6], and PMM records | bad << 16
+ * in data[7].
+ */
 static uint8_t test_tile_events_handler(const union request *request, struct response *response)
 {
 	ARG_UNUSED(request);
@@ -234,6 +348,8 @@ static uint8_t test_tile_events_handler(const union request *request, struct res
 	response->data[3] = tile_stats.bad;
 	response->data[4] = tile_stats.queue_full;
 	response->data[5] = tile_stats.overflows;
+	response->data[6] = (pmm_stats.irq[0] & 0xFFFF) | pmm_stats.irq[1] << 16;
+	response->data[7] = (pmm_stats.records & 0xFFFF) | pmm_stats.bad << 16;
 	return 0;
 }
 
@@ -242,6 +358,7 @@ REGISTER_MESSAGE(TT_SMC_MSG_TEST_TILE_EVENTS, test_tile_events_handler);
 static int device_events_init(void)
 {
 	UpdateTelemetryEventRing((uint32_t)&ring);
+	pmm_init();
 	return 0;
 }
 /* Publish alongside the rest of telemetry. */
