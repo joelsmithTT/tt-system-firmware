@@ -88,3 +88,23 @@ reset when done.
 
 The BRISC program clears its NOC transaction counters before sending; they are stale after
 reset, and waiting on them otherwise never finishes.
+
+### Through tt-umd
+
+`umd/umd_tile_events` drives the same BRISC program the way a tt-metal-like host would: UMD's
+`Cluster` loads and releases it, and UMD's `DeviceEventReader` reads the records back from the KMD.
+It needs a tt-umd checkout with `DeviceEventReader`, which is tt-umd stack #3793 (PRs #3791 and
+#3792, tested at `d3a8673a`), and CMake 3.24 or newer.
+
+```sh
+cd umd
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTT_UMD_DIR=~/tt-umd
+cmake --build build
+./build/umd_tile_events send ../brisc.bin 100 1,2   # 100 records from (1,2) through PMM
+./build/umd_tile_events watch 60                    # print records, like tt-events watch
+```
+
+The build compiles UMD's library too; no separate UMD build is needed. `send` checks that every
+record arrives intact, that none are lost, and that ARC cleared every record's magic, then prints
+`PASS` or `FAIL`. Run `watch` next to anything else that publishes, such as tt-metal's
+`L1EccHaltTest`, to see its records through UMD.
