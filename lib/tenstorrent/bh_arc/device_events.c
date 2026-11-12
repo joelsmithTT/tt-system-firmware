@@ -16,7 +16,10 @@
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/util.h>
 
+#include "harvesting.h"
+#include "noc.h"
 #include "noc2axi.h"
+#include "noc_init.h"
 #include "pcie.h"
 #include "telemetry.h"
 #include "timer.h"
@@ -229,7 +232,11 @@ void msi_catcher_overflowed(void)
 /*
  * EXPERIMENT: the same records, announced through the PMM mailbox (8,0):0x80400000
  * instead of the MSI catcher.  A tile writes one 32-bit PMM message:
- *   bits 31:26  x, bits 25:20  y (translated)
+ *   bits 31:26  x, bits 25:20  y: the tile's NOC 0 coordinates (NOC_NODE_ID of
+ *               its NOC 0 NIU), not translated ones.  PMM files the message in
+ *               the 17x12 slot those fields name and drops any outside the grid,
+ *               which translated Ethernet (20-31, 25) and GDDR (17-18, 12-23)
+ *               coordinates are.
  *   bit 12      flag0: a record is pending
  *   bits 11:0   record L1 address >> 9 (512-byte aligned)
  * PMM keeps the latest message per tile, so a burst from many tiles loses
@@ -237,6 +244,9 @@ void msi_catcher_overflowed(void)
  * flagged tiles from the column bitmaps, forwards each record, clears the
  * tile's flag by writing a message on its behalf, then acks by clearing the
  * magic.  A tile waits for the ack before announcing its next record.
+ * ARC's NIU translates, so ARC converts the slot's NOC 0 coordinates to
+ * translated ones to read the record, and reports those as the source.
+ * Tensix, Ethernet and GDDR tiles can all announce this way.
  */
 #define PMM_BASE              0x80400000
 #define PMM_MESSAGE           (PMM_BASE + 0x000)
@@ -260,6 +270,33 @@ static struct {
 	uint32_t irq[2], records, bad;
 } pmm_stats;
 
+/*
+ * Whether NOC 0 (x, y) is an unharvested Tensix, Ethernet or GDDR tile.  A NOC
+ * access to a tile that isn't there can hang.
+ */
+static bool pmm_tile_enabled(uint32_t x, uint32_t y)
+{
+	if (x >= NOC_X_SIZE || y >= NOC_Y_SIZE) {
+		return false;
+	}
+
+	uint8_t px = NocToPhysX(x, 0);
+
+	if (px == 0 || px == NOC_X_SIZE - 1) {
+		/* GDDR columns: 4 instances each, 3 NOC nodes per instance. */
+		uint8_t gddr_inst = (px ? 4 : 0) + NocToPhysY(y, 0) / 3;
+
+		return tile_enable.gddr_enabled & BIT(gddr_inst);
+	}
+	if (px > NUM_TENSIX_X) {
+		return false; /* L2CPU, ARC and security column */
+	}
+	if (y == 1) {
+		return tile_enable.eth_enabled & BIT(px - 1);
+	}
+	return y >= 2 && (tile_enable.tensix_col_enabled & BIT(px - 1));
+}
+
 static void pmm_work_handler(struct k_work *work)
 {
 	uint32_t cols;
@@ -277,11 +314,13 @@ static void pmm_work_handler(struct k_work *work)
 					continue;
 				}
 				uint32_t addr = (ReadReg(PMM_MAILBOX(x, y)) & 0xFFF) << 9;
-				bool ok = tile_coords_ok(x, y);
+				bool ok = pmm_tile_enabled(x, y);
+				uint8_t tx = 0, ty = 0;
 				uint32_t w[6];
 
 				if (ok) {
-					NOC2AXITlbSetup(0, TILE_EVENT_TLB, x, y, addr);
+					NocPhysicalToLogical(x, y, &tx, &ty);
+					NOC2AXITlbSetup(0, TILE_EVENT_TLB, tx, ty, addr);
 					for (int i = 0; i < 6; i++) {
 						w[i] = NOC2AXIRead32(0, TILE_EVENT_TLB, addr + 4 * i);
 					}
@@ -289,10 +328,13 @@ static void pmm_work_handler(struct k_work *work)
 					     (w[1] & 0xFFFF) <= EVENT_TYPE_FW_MAX;
 				}
 				if (ok) {
-					event_ring_append(w[1] & 0xFFFF, EVENT_SOURCE_TILE(x, y),
+					event_ring_append(w[1] & 0xFFFF, EVENT_SOURCE_TILE(tx, ty),
 							  w[2], &w[3]);
 				}
-				/* Clear the flag before the ack, or the tile's next one is lost. */
+				/*
+				 * Clear the flag before the ack, or the tile's next one is lost.
+				 * The slot is keyed by NOC 0 coordinates.
+				 */
 				WriteReg(PMM_MESSAGE, x << 26 | y << 20);
 				if (ok) {
 					NOC2AXIWrite32(0, TILE_EVENT_TLB, addr, 0);

@@ -23,7 +23,7 @@ tile in its own slot, so a burst from many tiles loses nothing. The tile writes 
 
 | Bits | Field |
 | --- | --- |
-| 31:26, 25:20 | its translated x, y |
+| 31:26, 25:20 | its NoC0 x, y (`NOC_NODE_ID` of its NoC0 NIU), **not** translated |
 | 12 | flag0: a record is pending |
 | 11:0 | record L1 address >> 9 (records 512-byte aligned) |
 
@@ -32,6 +32,12 @@ line 77; regular is 76). The handler finds flagged tiles from `PMM_FLG0_COL_STAT
 per-column bitmaps, forwards each record, clears the tile's flag by writing a message on its
 behalf, and only then clears the magic. A tile waits for that ack before announcing its next
 record, since a second message would overwrite the first.
+
+PMM files a message in the 17×12 slot its x/y fields name and drops any outside the grid, so
+translated Ethernet (20–31, 25) and GDDR (17–18, 12–23) coordinates never land. With NoC0
+coordinates, Tensix, ERISC and DRISC tiles all get their own slot. ARC's NIU translates, so ARC
+converts a slot's NoC0 coordinates to translated ones (each tile's `NOC_ID_LOGICAL`) to read the
+record, and reports the translated ones as `source`. ARC ignores a slot whose tile is harvested.
 
 Register map: syseng `blackhole-bringup`, `t6py/.../data/blackhole/a0/arc.json`, `pmm_block`.
 Production firmware doesn't otherwise use PMM.

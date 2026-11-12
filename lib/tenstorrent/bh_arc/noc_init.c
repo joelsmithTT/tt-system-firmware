@@ -835,3 +835,11 @@ void NocLogicalToPhysical(uint8_t logical_x, uint8_t logical_y, uint8_t *phys_x,
 		*phys_y = logical_y;
 	}
 }
+
+void NocPhysicalToLogical(uint8_t noc0_x, uint8_t noc0_y, uint8_t *logical_x, uint8_t *logical_y)
+{
+	uint16_t logical = translation[0].logical_coords[noc0_x][noc0_y];
+
+	*logical_x = logical & 0x3F;
+	*logical_y = logical >> 6;
+}

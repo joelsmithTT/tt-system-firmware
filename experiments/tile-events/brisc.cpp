@@ -19,6 +19,7 @@
 #define NOC_AT_LEN_BE 0x020u
 #define NOC_CMD_CTRL 0x040u
 #define NOC_COUNTER_CLEAR 0x060u
+#define NOC_NODE_ID 0x044u
 #define NOC_ID_LOGICAL 0x148u
 #define NOC_CMD_BUF_OFFSET 0x800u
 #define NOC_COUNTER_BASE 0x200u
@@ -38,7 +39,8 @@ extern "C" void brisc_main()
     const uint32_t marker = RD(PARAM_MARKER);
     const uint32_t sync = RD(PARAM_SYNC);
     const uint32_t pmm = RD(PARAM_PMM);
-    const uint32_t me = RD(NOC0 + NOC_ID_LOGICAL) & 0xFFFu;
+    const uint32_t me = RD(NOC0 + NOC_ID_LOGICAL) & 0xFFFu; // translated: the MSI catcher token
+    const uint32_t me0 = RD(NOC0 + NOC_NODE_ID) & 0xFFFu;   // NOC 0: the PMM message selects a slot by these
 
     WR(NOC0 + 0x100u, RD(NOC0 + 0x100u) | (1u << 16)); // NIU_CFG_0: enable command FIFOs, as tt-lab does
     WR(NOC0 + WR_BUF + NOC_TARG_ADDR_MID, 0u);
@@ -67,7 +69,7 @@ extern "C" void brisc_main()
                 WR(DONE, DONE_STUCK | (i - 1));
                 return;
             }
-            WR(tok, (me & 0x3Fu) << 26 | (me >> 6) << 20 | 1u << 12 | rec >> 9);
+            WR(tok, (me0 & 0x3Fu) << 26 | (me0 >> 6) << 20 | 1u << 12 | rec >> 9);
         } else {
             WR(tok, 0x80000000u | ((rec >> 4) << 12) | me);
         }

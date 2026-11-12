@@ -24,6 +24,8 @@ void EnableArcNocTranslation(void);
 void RestoreArcNocTranslation(void);
 bool IsNocTranslationEnabled(void);
 void NocLogicalToPhysical(uint8_t logical_x, uint8_t logical_y, uint8_t *phys_x, uint8_t *phys_y);
+/* NOC 0 coordinates to the translated ones ARC uses to reach the tile (the tile's NOC_ID_LOGICAL). */
+void NocPhysicalToLogical(uint8_t noc0_x, uint8_t noc0_y, uint8_t *logical_x, uint8_t *logical_y);
 void SetSingleTileClockGate(uint8_t noc0_x, uint8_t noc0_y, bool gate);
 
 /* Returns NOC 0 coordinates of an enabled, unharvested tensix core.
